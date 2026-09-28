@@ -1,0 +1,384 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+    <meta charset="UTF-8">
+    <!-- Prevents zooming on mobile/tablets for a native app feel -->
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+    <title>웹 오목 (Omok)</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <style>
+        @import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;600;700&display=swap');
+        
+        body {
+            font-family: 'Inter', sans-serif;
+            background-color: #1a1a1a;
+            color: #ffffff;
+            margin: 0;
+            overflow: hidden; /* Prevent pull-to-refresh and scrolling */
+            touch-action: none; /* Disable browser touch actions like pinch-zoom */
+            user-select: none; /* Disable text selection while tapping */
+            -webkit-user-select: none;
+        }
+
+        #game-board {
+            /* Wooden board color as a fallback, though drawn in canvas too */
+            background-color: #deb887;
+            box-shadow: 0 10px 30px rgba(0,0,0,0.5);
+            border-radius: 4px;
+            cursor: pointer;
+        }
+
+        /* Smooth fade in for the overlay */
+        .fade-in {
+            animation: fadeIn 0.3s ease-in-out;
+        }
+
+        @keyframes fadeIn {
+            from { opacity: 0; backdrop-filter: blur(0px); }
+            to { opacity: 1; backdrop-filter: blur(4px); }
+        }
+    </style>
+</head>
+<body class="flex flex-col items-center justify-center min-h-screen">
+
+    <div class="flex flex-col items-center w-full max-w-2xl px-4">
+        <!-- Header & Turn Indicator -->
+        <div class="flex justify-between items-center w-full mb-4">
+            <h1 class="text-3xl font-bold text-amber-500 tracking-wider">OMOK</h1>
+            <div id="turn-indicator" class="flex items-center gap-2 bg-neutral-800 px-4 py-2 rounded-full border border-neutral-700 shadow-md transition-colors duration-300">
+                <div id="turn-color-dot" class="w-4 h-4 rounded-full bg-black border-2 border-neutral-500 shadow-inner"></div>
+                <span id="turn-text" class="font-semibold text-lg">흑돌 차례</span>
+            </div>
+        </div>
+
+        <!-- Canvas Container with Overlay -->
+        <div class="relative w-full aspect-square max-w-[600px] flex items-center justify-center">
+            <canvas id="game-board"></canvas>
+            
+            <!-- Game Over Overlay -->
+            <div id="win-overlay" class="hidden absolute inset-0 bg-black/70 backdrop-blur-sm flex-col items-center justify-center rounded-sm z-10 transition-all">
+                <h2 id="win-message" class="text-5xl font-bold mb-6 text-white drop-shadow-lg tracking-wide">흑돌 승리!</h2>
+                <button onclick="resetGame()" class="px-8 py-3 bg-amber-600 hover:bg-amber-500 text-white rounded-full font-bold text-xl shadow-[0_0_15px_rgba(217,119,6,0.5)] transition transform hover:scale-105 active:scale-95">
+                    다시 하기
+                </button>
+            </div>
+        </div>
+
+        <!-- Controls -->
+        <div class="mt-8 flex gap-4">
+            <button onclick="undoMove()" class="px-6 py-3 bg-blue-600 hover:bg-blue-500 text-white rounded-full font-semibold shadow-md transition flex items-center gap-2 active:bg-blue-700 active:scale-95 text-lg touch-manipulation">
+                <svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 7v6h6"/><path d="M21 17a9 9 0 0 0-9-9 9 9 0 0 0-6 2.3L3 13"/></svg>
+                무르기
+            </button>
+            <button onclick="resetGame()" class="px-6 py-3 bg-neutral-700 hover:bg-neutral-600 text-neutral-200 rounded-full font-semibold shadow-md transition flex items-center gap-2 active:bg-neutral-800 active:scale-95 text-lg touch-manipulation">
+                <svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 12a9 9 0 1 0 9-9 9.75 9.75 0 0 0-6.74 2.74L3 8"/><path d="M3 3v5h5"/></svg>
+                다시 시작
+            </button>
+        </div>
+    </div>
+
+    <script>
+        const canvas = document.getElementById('game-board');
+        const ctx = canvas.getContext('2d');
+        const turnText = document.getElementById('turn-text');
+        const turnDot = document.getElementById('turn-color-dot');
+        const turnIndicator = document.getElementById('turn-indicator');
+        const winOverlay = document.getElementById('win-overlay');
+        const winMessage = document.getElementById('win-message');
+
+        const BOARD_SIZE = 15; // 15x15 intersections
+        let board = [];
+        let currentPlayer = 1; // 1: Black, 2: White
+        let gameOver = false;
+        let history = []; // 착수 히스토리 기록용 배열
+        
+        // Rendering metrics
+        let canvasSize = 0;
+        let cellSize = 0;
+        let margin = 0;
+        let stoneRadius = 0;
+
+        // Initialize empty board
+        function initBoard() {
+            board = Array.from({ length: BOARD_SIZE }, () => Array(BOARD_SIZE).fill(0));
+        }
+
+        function resizeCanvas() {
+            // Determine maximum available space while maintaining aspect ratio
+            const container = canvas.parentElement;
+            const size = Math.min(container.clientWidth, window.innerHeight * 0.7); // Cap height to leave room for UI
+            
+            // For high-DPI displays (retina screens on tablets/phones)
+            const dpr = window.devicePixelRatio || 1;
+            
+            canvasSize = size;
+            canvas.style.width = `${size}px`;
+            canvas.style.height = `${size}px`;
+            canvas.width = size * dpr;
+            canvas.height = size * dpr;
+            
+            ctx.scale(dpr, dpr);
+
+            // Calculate grid sizes
+            // We need 15 intersections, meaning 14 gaps between them. 
+            // Margin acts as a half-cell padding around the edge.
+            cellSize = canvasSize / BOARD_SIZE;
+            margin = cellSize / 2;
+            stoneRadius = cellSize * 0.45; // Stone takes up 90% of the cell
+
+            drawFullBoard();
+        }
+
+        function drawBoardBackground() {
+            // Wood background
+            ctx.fillStyle = '#deb887'; 
+            ctx.fillRect(0, 0, canvasSize, canvasSize);
+
+            ctx.strokeStyle = '#3e2723'; // Dark brown for lines
+            ctx.lineWidth = 1.5;
+
+            // Draw grid lines
+            ctx.beginPath();
+            for (let i = 0; i < BOARD_SIZE; i++) {
+                const pos = margin + i * cellSize;
+                // Horizontal lines
+                ctx.moveTo(margin, pos);
+                ctx.lineTo(canvasSize - margin, pos);
+                // Vertical lines
+                ctx.moveTo(pos, margin);
+                ctx.lineTo(pos, canvasSize - margin);
+            }
+            ctx.stroke();
+
+            // Draw star points (화점) for 15x15 board
+            const starPoints = [
+                {r: 3, c: 3}, {r: 3, c: 11}, 
+                {r: 7, c: 7}, 
+                {r: 11, c: 3}, {r: 11, c: 11}
+            ];
+
+            ctx.fillStyle = '#3e2723';
+            starPoints.forEach(point => {
+                const cx = margin + point.c * cellSize;
+                const cy = margin + point.r * cellSize;
+                ctx.beginPath();
+                ctx.arc(cx, cy, 4, 0, Math.PI * 2);
+                ctx.fill();
+            });
+        }
+
+        function drawStone(r, c, player) {
+            const cx = margin + c * cellSize;
+            const cy = margin + r * cellSize;
+            
+            ctx.beginPath();
+            ctx.arc(cx, cy, stoneRadius, 0, Math.PI * 2);
+
+            // Create a radial gradient for a 3D sphere effect
+            // Highlight is slightly offset to the top-left
+            const gradient = ctx.createRadialGradient(
+                cx - stoneRadius * 0.3, 
+                cy - stoneRadius * 0.3, 
+                stoneRadius * 0.1, 
+                cx, 
+                cy, 
+                stoneRadius
+            );
+
+            if (player === 1) { // Black stone
+                gradient.addColorStop(0, '#666'); // Highlight
+                gradient.addColorStop(0.8, '#111');
+                gradient.addColorStop(1, '#000'); // Shadow edge
+            } else { // White stone
+                gradient.addColorStop(0, '#fff'); // Highlight
+                gradient.addColorStop(0.8, '#e0e0e0');
+                gradient.addColorStop(1, '#999'); // Shadow edge
+            }
+
+            ctx.fillStyle = gradient;
+            ctx.fill();
+            
+            // Add a subtle drop shadow
+            ctx.shadowColor = 'rgba(0, 0, 0, 0.4)';
+            ctx.shadowBlur = 4;
+            ctx.shadowOffsetX = 2;
+            ctx.shadowOffsetY = 2;
+            ctx.fill();
+            
+            // Reset shadow so it doesn't affect the next drawings
+            ctx.shadowColor = 'transparent';
+        }
+
+        function drawFullBoard() {
+            drawBoardBackground();
+            for (let r = 0; r < BOARD_SIZE; r++) {
+                for (let c = 0; c < BOARD_SIZE; c++) {
+                    if (board[r][c] !== 0) {
+                        drawStone(r, c, board[r][c]);
+                    }
+                }
+            }
+        }
+
+        function updateTurnUI() {
+            if (currentPlayer === 1) {
+                turnText.innerText = "흑돌 차례";
+                turnDot.className = "w-4 h-4 rounded-full bg-black border border-neutral-500 shadow-inner";
+            } else {
+                turnText.innerText = "백돌 차례";
+                turnDot.className = "w-4 h-4 rounded-full bg-white border border-neutral-300 shadow-inner";
+            }
+        }
+
+        function showWinScreen(player) {
+            gameOver = true;
+            winMessage.innerText = player === 1 ? "흑돌 승리!" : "백돌 승리!";
+            winMessage.className = `text-5xl font-bold mb-6 drop-shadow-lg tracking-wide ${player === 1 ? 'text-neutral-800' : 'text-white'}`;
+            
+            winOverlay.classList.remove('hidden');
+            winOverlay.classList.add('flex', 'fade-in');
+            
+            // Overlay background color adjusts slightly based on winner
+            winOverlay.style.backgroundColor = player === 1 ? 'rgba(255, 255, 255, 0.7)' : 'rgba(0, 0, 0, 0.7)';
+        }
+
+        function checkWin(r, c, player) {
+            // Directions: Horizontal(-), Vertical(|), Diagonal(\), Diagonal(/)
+            const directions = [
+                [[0, 1], [0, -1]],   // Horizontal
+                [[1, 0], [-1, 0]],   // Vertical
+                [[1, 1], [-1, -1]],  // Diagonal \
+                [[1, -1], [-1, 1]]   // Diagonal /
+            ];
+
+            for (let dir of directions) {
+                let count = 1; // Count the stone just placed
+
+                for (let way of dir) {
+                    let dr = way[0];
+                    let dc = way[1];
+                    let nr = r + dr;
+                    let nc = c + dc;
+
+                    // Traverse in one direction while matching stones
+                    while (nr >= 0 && nr < BOARD_SIZE && nc >= 0 && nc < BOARD_SIZE && board[nr][nc] === player) {
+                        count++;
+                        nr += dr;
+                        nc += dc;
+                    }
+                }
+
+                // Standard Gomoku rule: 5 or more in a row wins
+                if (count >= 5) {
+                    return true;
+                }
+            }
+            return false;
+        }
+
+        function handleInteraction(e) {
+            if (gameOver) return;
+
+            // Prevent default behavior to avoid scrolling on touch devices
+            e.preventDefault(); 
+
+            const rect = canvas.getBoundingClientRect();
+            let clientX, clientY;
+
+            // Handle both Touch and Mouse events
+            if (e.touches && e.touches.length > 0) {
+                clientX = e.touches[0].clientX;
+                clientY = e.touches[0].clientY;
+            } else {
+                clientX = e.clientX;
+                clientY = e.clientY;
+            }
+
+            // Calculate internal canvas coordinates
+            // Using rect.width instead of canvasSize because CSS might scale the canvas slightly
+            const scaleX = canvasSize / rect.width; 
+            const scaleY = canvasSize / rect.height;
+            
+            const x = (clientX - rect.left) * scaleX;
+            const y = (clientY - rect.top) * scaleY;
+
+            // Map pixel coordinates to grid indices
+            const c = Math.round((x - margin) / cellSize);
+            const r = Math.round((y - margin) / cellSize);
+
+            // Check boundaries and if spot is empty
+            if (r >= 0 && r < BOARD_SIZE && c >= 0 && c < BOARD_SIZE && board[r][c] === 0) {
+                // Place stone
+                board[r][c] = currentPlayer;
+                history.push({ r, c }); // 방금 둔 좌표를 히스토리에 저장
+                drawStone(r, c, currentPlayer);
+
+                // Check for win
+                if (checkWin(r, c, currentPlayer)) {
+                    // Small delay to allow the stone rendering to be seen before overlay
+                    setTimeout(() => showWinScreen(currentPlayer), 50);
+                } else {
+                    // Switch turn
+                    currentPlayer = currentPlayer === 1 ? 2 : 1;
+                    updateTurnUI();
+                }
+            }
+        }
+
+        // Expose reset globally for the inline onclick handlers
+        window.resetGame = function() {
+            initBoard();
+            currentPlayer = 1;
+            gameOver = false;
+            history = []; // 게임 초기화 시 히스토리도 비움
+            updateTurnUI();
+            
+            winOverlay.classList.remove('flex', 'fade-in');
+            winOverlay.classList.add('hidden');
+            
+            drawFullBoard();
+        };
+
+        // 한 수 무르기 로직
+        window.undoMove = function() {
+            if (history.length === 0) return; // 무를 수단(돌)이 없으면 실행 안함
+
+            // 마지막 착수 위치 가져오기
+            const lastMove = history.pop(); 
+            board[lastMove.r][lastMove.c] = 0; // 해당 위치를 다시 빈칸으로
+
+            // 턴을 이전 플레이어로 되돌리기
+            currentPlayer = currentPlayer === 1 ? 2 : 1;
+            updateTurnUI();
+
+            // 만약 승리 화면(게임 오버)이 떠있는 상태라면 해제
+            if (gameOver) {
+                gameOver = false;
+                winOverlay.classList.remove('flex', 'fade-in');
+                winOverlay.classList.add('hidden');
+            }
+
+            // 캔버스 초기화 후 바둑판과 남아있는 돌 다시 그리기
+            drawFullBoard();
+        };
+
+        // Attach event listeners for tablet/mouse support
+        // pointerdown handles both mouse clicks and touch taps cleanly in modern browsers
+        if (window.PointerEvent) {
+            canvas.addEventListener('pointerdown', handleInteraction, { passive: false });
+        } else {
+            // Fallback for older browsers
+            canvas.addEventListener('touchstart', handleInteraction, { passive: false });
+            canvas.addEventListener('mousedown', handleInteraction, { passive: false });
+        }
+        
+        window.addEventListener('resize', resizeCanvas);
+
+        // Bootstrap the game
+        initBoard();
+        resizeCanvas();
+        updateTurnUI();
+
+    </script>
+</body>
+</html>
